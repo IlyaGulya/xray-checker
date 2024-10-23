@@ -1,0 +1,34 @@
+{
+  "log": {
+    "loglevel": "debug"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": {{ .RandomPort }},
+      "protocol": "socks",
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "{{ .Protocol }}",
+      "settings": {
+        "servers": [
+          {
+            "address": "{{ .Server }}",
+            "method": "{{ .Method }}",
+            "password": "{{ .UID }}",
+            "port": {{ .Port }}
+          }
+        ]
+      }
+    }
+  ],
+  "webhook": "{{ .MonitorLink }}"
+}

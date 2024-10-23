@@ -1,4 +1,4 @@
-FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:1.21 as builder
+FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:1.23.2 AS builder
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -31,4 +31,4 @@ COPY --from=builder /usr/bin/xray-checker /app/xray-checker
 COPY ./templates /app/templates
 # USER nonroot:nonroot
 
-CMD ["/app/xray-checker"]
+ENTRYPOINT ["/app/xray-checker"]

@@ -1,0 +1,49 @@
+{
+  "log": {
+    "loglevel": "debug"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": {{ .RandomPort }},
+      "protocol": "socks",
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "{{ .Protocol }}",
+      "settings": {
+        "vnext": [
+          {
+            "address": "{{ .Server }}",
+            "port": {{ .Port }},
+            "users": [
+              {
+                "id": "{{ .UID }}",
+                "encryption": "none",
+                "flow": "{{ .Flow }}"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "{{ .Type }}",
+        "security": "{{ .Security }}",
+        "realitySettings": {
+          "serverName": "{{ .SNI }}",
+          "fingerprint": "{{ .FP }}",
+          "publicKey": "{{ .PBK }}",
+          "shortId": "{{ .SID }}"
+        }
+      }
+    }
+  ],
+  "webhook": "{{ .MonitorLink }}"
+}

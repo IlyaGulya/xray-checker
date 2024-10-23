@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -139,19 +140,27 @@ func scheduleConfigs(configDir string, scheduler *gocron.Scheduler, provider mod
 }
 
 func main() {
-	configDir := "./configs"
-	programConfigPath := "./config.json"
-	templateDir := "./templates"
+	var (
+		configPath     string
+		xrayConfigsDir string
+		templateDir    string
+	)
 
-	if _, err := os.Stat(configDir); os.IsNotExist(err) {
-		err := os.Mkdir(configDir, os.ModePerm)
+	// Set up command line flags
+	flag.StringVar(&configPath, "config", "config.json", "Path to the main configuration file")
+	flag.StringVar(&xrayConfigsDir, "configs-dir", "configs", "Directory containing Xray configuration files")
+	flag.StringVar(&templateDir, "templates-dir", "templates", "Directory containing template files")
+	flag.Parse()
+
+	if _, err := os.Stat(xrayConfigsDir); os.IsNotExist(err) {
+		err := os.Mkdir(xrayConfigsDir, os.ModePerm)
 		if err != nil {
 			fmt.Println("error creating directory:", err)
 			return
 		}
 	}
 
-	provider, err := loadProgramConfig(programConfigPath)
+	provider, err := loadProgramConfig(configPath)
 	if err != nil {
 		fmt.Println("error loading program configuration:", err)
 		return
@@ -167,7 +176,7 @@ func main() {
 		parsedLink.MonitorLink = config.MonitorLink
 		parsedLink.RandomPort = provider.GetProxyStartPort() + i
 
-		err = utils.GenerateXrayConfig(parsedLink, templateDir, configDir)
+		err = utils.GenerateXrayConfig(parsedLink, templateDir, xrayConfigsDir)
 		if err != nil {
 			fmt.Println("error generating Xray config:", err)
 			continue
@@ -186,7 +195,7 @@ func main() {
 		go worker(w, jobs, provider, &wg)
 	}
 
-	scheduleConfigs(configDir, scheduler, provider, jobs)
+	scheduleConfigs(xrayConfigsDir, scheduler, provider, jobs)
 
 	go scheduler.StartBlocking()
 

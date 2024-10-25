@@ -40,27 +40,26 @@ func setupMocks(t *testing.T, tt testCase, configPath string, provider models.Pr
 	// Setup CommandRunner expectations
 	if tt.expectXrayStart {
 		cmd := exec.Command("echo", "dummy")
+		runCmdMock := mockCmd.EXPECT().RunCommand("xray", "-c", configPath)
 		if tt.xrayError != nil {
-			mockCmd.On("RunCommand", "xray", "-c", configPath).Return(nil, tt.xrayError)
+			runCmdMock.Return(nil, tt.xrayError)
 		} else {
-			mockCmd.On("RunCommand", "xray", "-c", configPath).Return(cmd, nil)
+			runCmdMock.Return(cmd, nil)
 			if tt.shouldKillCmd {
-				mockCmd.On("KillCommand", cmd).Return(nil)
+				mockCmd.EXPECT().KillCommand(cmd).Return(nil)
 			}
 		}
 	}
 
 	// Setup IPChecker expectations
+	ipMock := mockIP.EXPECT().GetIP(provider.GetCheckService(), mock.AnythingOfType("*http.Client"))
 	if tt.sourceIPError != nil {
-		mockIP.On("GetIP", provider.GetCheckService(), mock.AnythingOfType("*http.Client")).
-			Return(tt.sourceIP, tt.sourceIPError).Once()
+		ipMock.Return(tt.sourceIP, tt.sourceIPError).Once()
 	} else {
-		mockIP.On("GetIP", provider.GetCheckService(), mock.AnythingOfType("*http.Client")).
-			Return(tt.sourceIP, nil).Once()
+		ipMock.Return(tt.sourceIP, nil).Once()
 
 		if tt.xrayError == nil && tt.expectXrayStart {
-			mockIP.On("GetIP", provider.GetCheckService(), mock.AnythingOfType("*http.Client")).
-				Return(tt.vpnIP, tt.vpnIPError).Once()
+			ipMock.Return(tt.vpnIP, tt.vpnIPError).Once()
 		}
 	}
 

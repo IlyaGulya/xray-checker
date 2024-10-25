@@ -47,76 +47,12 @@ func loadProgramConfig(configPath string) (models.Provider, error) {
 	return provider, nil
 }
 
-func processConfigFile(configPath string, provider models.Provider) {
-	logData := models.ConnectionData{ConfigFile: configPath}
-
-	configData, err := os.ReadFile(configPath)
-	if err != nil {
-		logData.Error = fmt.Errorf("error reading xray config: %v", err)
-		utils.LogResult(logData)
-		return
-	}
-
-	var config models.XrayConfig
-	err = json.Unmarshal(configData, &config)
-	if err != nil {
-		logData.Error = fmt.Errorf("error parsing xray config: %v", err)
-		utils.LogResult(logData)
-		return
-	}
-
-	logData.WebhookURL = config.Webhook
-	if logData.WebhookURL == "" {
-		logData.Error = fmt.Errorf("webhook URL not found in xray config")
-		utils.LogResult(logData)
-		return
-	}
-
-	logData.SourceIP, err = utils.GetIP(provider.GetCheckService(), utils.GetIPv4Client())
-	if err != nil {
-		logData.Error = fmt.Errorf("error getting source IP: %v", err)
-		utils.LogResult(logData)
-		return
-	}
-
-	listen := config.Inbounds[0].Listen
-	port := config.Inbounds[0].Port
-	logData.ProxyAddress = fmt.Sprintf("socks5://%s:%d", listen, port)
-
-	cmd, err := utils.RunXray(configPath)
-	if err != nil {
-		logData.Error = fmt.Errorf("error starting Xray: %v", err)
-		utils.LogResult(logData)
-		return
-	}
-	defer utils.KillXray(cmd)
-	time.Sleep(4 * time.Second)
-
-	proxyClient, err := utils.CreateProxyClient(logData.ProxyAddress)
-	if err != nil {
-		logData.Error = fmt.Errorf("error creating proxy client: %v", err)
-		utils.LogResult(logData)
-		return
-	}
-
-	logData.VPNIP, err = utils.GetIP(provider.GetCheckService(), proxyClient)
-	if err != nil {
-		logData.Error = fmt.Errorf("error getting VPN IP through proxy: %v", err)
-		utils.LogResult(logData)
-		return
-	}
-
-	err = provider.ProcessResults(logData)
-	if err != nil {
-		logData.Error = fmt.Errorf("error processing results: %v", err)
-	}
-}
-
 func worker(id int, jobs <-chan string, provider models.Provider, wg *sync.WaitGroup) {
 	defer wg.Done()
+	service := NewDefaultXrayCheckerService()
 	for configPath := range jobs {
 		log.Printf("Worker %d processing config: %s\n", id, configPath)
-		processConfigFile(configPath, provider)
+		service.ProcessConfigFile(configPath, provider)
 	}
 }
 

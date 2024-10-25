@@ -1,0 +1,12 @@
+with-expecter: true
+outpkg: mocks
+dir: mocks
+mockname: "{{.InterfaceName}}"
+packages:
+  xray-checker:
+    # place your package-specific config here
+    config:
+    interfaces:
+      # select the interfaces you want mocked
+      CommandRunner:
+      IPChecker:

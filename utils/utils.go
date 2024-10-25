@@ -3,7 +3,6 @@ package utils
 import (
 	"encoding/base64"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -96,31 +95,15 @@ func GenerateXrayConfig(parsedLink *models.ParsedLink, templateDir, outputDir st
 	return nil
 }
 
-func GetIP(url string, client *http.Client) (string, error) {
-	resp, err := client.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	ip, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(ip)), nil
+func RunXray(r CommandRunner, configPath string) (*exec.Cmd, error) {
+	return r.RunCommand("xray", "-c", configPath)
 }
 
-func RunXray(configPath string) (*exec.Cmd, error) {
-	cmd := exec.Command("xray", "-c", configPath)
-	err := cmd.Start()
+func KillXray(r CommandRunner, cmd *exec.Cmd) {
+	err := r.KillCommand(cmd)
 	if err != nil {
-		return nil, err
+		log.Printf("error killing xray process: %v", err)
 	}
-	return cmd, nil
-}
-
-func KillXray(cmd *exec.Cmd) error {
-	return cmd.Process.Kill()
 }
 
 func CreateProxyClient(proxyAddress string) (*http.Client, error) {
@@ -132,9 +115,9 @@ func CreateProxyClient(proxyAddress string) (*http.Client, error) {
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(proxyURL),
 		DialContext: (&net.Dialer{
-			Timeout:   20 * time.Second,
-			KeepAlive: 20 * time.Second,
-			DualStack: false,
+			Timeout:       20 * time.Second,
+			KeepAlive:     20 * time.Second,
+			FallbackDelay: -1,
 		}).DialContext,
 	}
 
@@ -148,9 +131,9 @@ func CreateProxyClient(proxyAddress string) (*http.Client, error) {
 func GetIPv4Client() *http.Client {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
-			Timeout:   20 * time.Second,
-			KeepAlive: 20 * time.Second,
-			DualStack: false,
+			Timeout:       20 * time.Second,
+			KeepAlive:     20 * time.Second,
+			FallbackDelay: -1,
 		}).DialContext,
 	}
 

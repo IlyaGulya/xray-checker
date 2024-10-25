@@ -14,6 +14,7 @@ import (
 	"xray-checker/mocks"
 	"xray-checker/models"
 	uptimekuma "xray-checker/providers/uptime-kuma"
+	"xray-checker/utils"
 )
 
 type testCase struct {
@@ -241,7 +242,7 @@ func TestDefaultIPChecker_GetIP(t *testing.T) {
 					httpmock.NewStringResponder(tt.statusCode, tt.response))
 			}
 
-			checker := &DefaultIPChecker{}
+			checker := &utils.DefaultIPChecker{}
 			client := &http.Client{}
 
 			ip, err := checker.GetIP(tt.url, client)

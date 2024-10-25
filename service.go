@@ -11,10 +11,10 @@ import (
 
 type XrayCheckerService struct {
 	commandRunner utils.CommandRunner
-	ipChecker     IPChecker
+	ipChecker     utils.IPChecker
 }
 
-func NewXrayCheckerService(runner utils.CommandRunner, ipChecker IPChecker) *XrayCheckerService {
+func NewXrayCheckerService(runner utils.CommandRunner, ipChecker utils.IPChecker) *XrayCheckerService {
 	return &XrayCheckerService{
 		commandRunner: runner,
 		ipChecker:     ipChecker,
@@ -23,7 +23,7 @@ func NewXrayCheckerService(runner utils.CommandRunner, ipChecker IPChecker) *Xra
 
 func NewDefaultXrayCheckerService() *XrayCheckerService {
 	runner := utils.DefaultCommandRunner{}
-	checker := DefaultIPChecker{}
+	checker := utils.DefaultIPChecker{}
 	return NewXrayCheckerService(&runner, &checker)
 }
 

@@ -9,58 +9,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
-	"time"
 	"xray-checker/internal/domain"
 	"xray-checker/internal/metrics"
 
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"xray-checker/internal/config"
-)
-
-// Config structures for XRay
-type (
-	Config struct {
-		Log       LogConfig        `json:"log"`
-		Inbounds  []InboundConfig  `json:"inbounds"`
-		Outbounds []OutboundConfig `json:"outbounds"`
-		Routing   RoutingConfig    `json:"routing"`
-	}
-
-	LogConfig struct {
-		LogLevel string `json:"loglevel"`
-	}
-
-	InboundConfig struct {
-		Tag      string         `json:"tag"`
-		Listen   string         `json:"listen"`
-		Port     int            `json:"port"`
-		Protocol string         `json:"protocol"`
-		Sniffing SniffingConfig `json:"sniffing"`
-	}
-
-	SniffingConfig struct {
-		Enabled      bool     `json:"enabled"`
-		DestOverride []string `json:"destOverride"`
-		RouteOnly    bool     `json:"routeOnly"`
-	}
-
-	OutboundConfig struct {
-		Tag            string          `json:"tag"`
-		Protocol       string          `json:"protocol"`
-		Settings       json.RawMessage `json:"settings"`
-		StreamSettings json.RawMessage `json:"streamSettings,omitempty"`
-	}
-
-	RoutingConfig struct {
-		Rules []RoutingRule `json:"rules"`
-	}
-
-	RoutingRule struct {
-		Type        string `json:"type"`
-		InboundTag  string `json:"inboundTag"`
-		OutboundTag string `json:"outboundTag"`
-	}
 )
 
 // Service manages a single XRay instance for all checks
@@ -70,29 +24,13 @@ type proxyConfig struct {
 }
 
 type Service struct {
-	logger        *zap.Logger
-	runner        Runner
-	configDir     string
-	unifiedConfig ConfigPath
-	proxyConfigs  map[domain.LinkName]proxyConfig
-	mutex         sync.RWMutex
-	metrics       *metrics.Collector
-	health        *healthChecker
-	retryConfig   retryConfig
-}
-
-type retryConfig struct {
-	maxAttempts int
-	baseDelay   time.Duration
-	maxDelay    time.Duration
-}
-
-type healthChecker struct {
-	lastCheck     time.Time
-	status        bool
-	checkInterval time.Duration
-	initialized   bool
-	mutex         sync.RWMutex
+	runner       Runner
+	logger       *zap.Logger
+	configDir    string
+	configPath   ConfigPath
+	proxyConfigs map[domain.LinkName]proxyConfig
+	metrics      *metrics.Collector
+	mutex        sync.RWMutex // needed for proxyConfigs access
 }
 
 func NewService(
@@ -100,54 +38,37 @@ func NewService(
 	cfg *config.Config,
 	links []domain.ParsedLink,
 	metrics *metrics.Collector,
+	runner Runner,
 	logger *zap.Logger,
 ) (*Service, error) {
 	service := &Service{
-		logger:        logger,
-		runner:        NewRunner(logger),
-		configDir:     cfg.XrayConfigsDir,
-		proxyConfigs:  make(map[domain.LinkName]proxyConfig),
-		unifiedConfig: ConfigPath(filepath.Join(cfg.XrayConfigsDir, "unified-config.json")),
-		metrics:       metrics,
-		health: &healthChecker{
-			checkInterval: 30 * time.Second,
-			// Initialize with false status
-			status:      false,
-			initialized: false,
-		},
-		retryConfig: retryConfig{
-			maxAttempts: 3,
-			baseDelay:   time.Second,
-			maxDelay:    10 * time.Second,
-		},
+		runner:       runner,
+		logger:       logger,
+		configDir:    cfg.XrayConfigsDir,
+		configPath:   ConfigPath(filepath.Join(cfg.XrayConfigsDir, "unified-config.json")),
+		proxyConfigs: make(map[domain.LinkName]proxyConfig),
+		metrics:      metrics,
 	}
 
+	// Initialize proxy configurations first
 	if err := service.initializeProxyConfigs(cfg, links); err != nil {
 		return nil, fmt.Errorf("failed to initialize proxy configs: %w", err)
 	}
 
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
+			// Generate XRay config before starting
 			if err := service.generateConfig(links); err != nil {
 				return fmt.Errorf("failed to generate config: %w", err)
 			}
-			if err := service.start(); err != nil {
-				return err
+
+			if err := service.runner.Start(service.configPath); err != nil {
+				return fmt.Errorf("failed to start xray: %w", err)
 			}
-
-			// Perform initial health check
-			service.health.mutex.Lock()
-			service.health.status = service.runner.IsRunning()
-			service.health.initialized = true
-			service.health.lastCheck = time.Now()
-			service.health.mutex.Unlock()
-
-			// Start health checker
-			go service.healthCheckLoop(ctx)
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
-			return service.stop()
+			return service.runner.Stop()
 		},
 	})
 
@@ -204,125 +125,17 @@ func (s *Service) initializeProxyConfigs(cfg *config.Config, links []domain.Pars
 	return nil
 }
 
-func (s *Service) healthCheckLoop(ctx context.Context) {
-	ticker := time.NewTicker(s.health.checkInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.checkHealth()
-		}
-	}
-}
-
-func (s *Service) checkHealth() {
-	s.health.mutex.Lock()
-	defer s.health.mutex.Unlock()
-
-	isHealthy := s.runner.IsRunning()
-	if !isHealthy && s.health.status {
-		// Service was healthy but now isn't - attempt recovery
-		s.logger.Warn("xray service unhealthy, attempting recovery")
-		if err := s.recoverService(); err != nil {
-			s.logger.Error("failed to recover xray service", zap.Error(err))
-		}
-	}
-
-	s.health.status = isHealthy
-	s.health.lastCheck = time.Now()
-}
-
-func (s *Service) recoverService() error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	// Stop existing service
-	if err := s.runner.Stop(); err != nil {
-		s.logger.Error("failed to stop unhealthy service", zap.Error(err))
-	}
-
-	// Attempt to restart with exponential backoff
-	var lastErr error
-	for attempt := 0; attempt < s.retryConfig.maxAttempts; attempt++ {
-		if attempt > 0 {
-			delay := s.calculateBackoff(attempt)
-			time.Sleep(delay)
-		}
-
-		if err := s.runner.Start(s.unifiedConfig); err != nil {
-			lastErr = err
-			s.logger.Error("failed to restart xray service",
-				zap.Error(err),
-				zap.Int("attempt", attempt+1))
-			continue
-		}
-
-		s.metrics.RecordXrayRestart()
-		s.logger.Info("xray service recovered successfully",
-			zap.Int("attempt", attempt+1))
-		return nil
-	}
-
-	return fmt.Errorf("failed to recover xray service after %d attempts: %w",
-		s.retryConfig.maxAttempts, lastErr)
-}
-
-func (s *Service) calculateBackoff(attempt int) time.Duration {
-	delay := s.retryConfig.baseDelay * time.Duration(1<<uint(attempt))
-	if delay > s.retryConfig.maxDelay {
-		delay = s.retryConfig.maxDelay
-	}
-	return delay
-}
-
+// GetProxyConfig returns the proxy configuration for a given link
 func (s *Service) GetProxyConfig(linkName domain.LinkName) (string, int, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	if !s.IsHealthy() {
-		return "", 0, fmt.Errorf("xray service is unhealthy")
-	}
-
-	config, exists := s.proxyConfigs[linkName]
+	cfg, exists := s.proxyConfigs[linkName]
 	if !exists {
 		return "", 0, fmt.Errorf("no proxy configuration found for link: %s", linkName)
 	}
 
-	return config.address, config.port, nil
-}
-
-func (s *Service) IsHealthy() bool {
-	s.health.mutex.RLock()
-	defer s.health.mutex.RUnlock()
-
-	if !s.health.initialized {
-		return false
-	}
-
-	return s.health.status && time.Since(s.health.lastCheck) <= s.health.checkInterval*2
-}
-
-func (s *Service) WaitForInitialization(ctx context.Context) error {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			s.health.mutex.RLock()
-			initialized := s.health.initialized
-			s.health.mutex.RUnlock()
-
-			if initialized {
-				return nil
-			}
-		}
-	}
+	return cfg.address, cfg.port, nil
 }
 
 func (s *Service) generateConfig(links []domain.ParsedLink) error {
@@ -384,7 +197,7 @@ func (s *Service) generateConfig(links []domain.ParsedLink) error {
 	}
 
 	// Create cfg directory if it doesn't exist
-	if err := os.MkdirAll(filepath.Dir(string(s.unifiedConfig)), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(string(s.configPath)), 0755); err != nil {
 		return fmt.Errorf("failed to create cfg directory: %w", err)
 	}
 
@@ -394,7 +207,7 @@ func (s *Service) generateConfig(links []domain.ParsedLink) error {
 		return fmt.Errorf("failed to marshal cfg: %w", err)
 	}
 
-	if err := os.WriteFile(string(s.unifiedConfig), data, 0644); err != nil {
+	if err := os.WriteFile(string(s.configPath), data, 0644); err != nil {
 		return fmt.Errorf("failed to write cfg file: %w", err)
 	}
 
@@ -603,19 +416,6 @@ func generateOutbound(l domain.ParsedLink, tag string) (OutboundConfig, error) {
 	}, nil
 }
 
-// Add transport protocol validation
-func isValidTransportProtocol(protocol string) bool {
-	validProtocols := map[string]bool{
-		"tcp":  true,
-		"ws":   true,
-		"http": true,
-		"grpc": true,
-		"quic": true,
-		"kcp":  true,
-	}
-	return validProtocols[protocol]
-}
-
 func getDefaultOutbounds() []OutboundConfig {
 	return []OutboundConfig{
 		{
@@ -634,40 +434,4 @@ func getDefaultOutbounds() []OutboundConfig {
 			Settings: json.RawMessage(`{"port":53,"address":"119.29.29.29","network":"udp"}`),
 		},
 	}
-}
-
-func (s *Service) start() error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if err := s.runner.Start(s.unifiedConfig); err != nil {
-		return fmt.Errorf("failed to start xray: %w", err)
-	}
-
-	// Wait for XRay to initialize
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Keep checking XRay's running state
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for xray to start")
-		case <-ticker.C:
-			if s.runner.IsRunning() {
-				s.logger.Info("xray service started and running")
-				return nil
-			}
-		}
-	}
-}
-
-func (s *Service) stop() error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	return s.runner.Stop()
 }

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
 	"xray-checker/internal/domain"
 	"xray-checker/internal/metrics"
 
@@ -17,20 +16,12 @@ import (
 	"xray-checker/internal/config"
 )
 
-// Service manages a single XRay instance for all checks
-type proxyConfig struct {
-	address string
-	port    int
-}
-
 type Service struct {
-	runner       Runner
-	logger       *zap.Logger
-	configDir    string
-	configPath   ConfigPath
-	proxyConfigs map[domain.LinkName]proxyConfig
-	metrics      *metrics.Collector
-	mutex        sync.RWMutex // needed for proxyConfigs access
+	runner     Runner
+	logger     *zap.Logger
+	configPath ConfigPath
+	metrics    *metrics.Collector
+	proxyPorts map[domain.LinkName]int // Maps link names to their ports
 }
 
 func NewService(
@@ -41,23 +32,39 @@ func NewService(
 	runner Runner,
 	logger *zap.Logger,
 ) (*Service, error) {
-	service := &Service{
-		runner:       runner,
-		logger:       logger,
-		configDir:    cfg.XrayConfigsDir,
-		configPath:   ConfigPath(filepath.Join(cfg.XrayConfigsDir, "unified-config.json")),
-		proxyConfigs: make(map[domain.LinkName]proxyConfig),
-		metrics:      metrics,
+	if cfg.Workers.ProxyStartPort <= 0 || cfg.Workers.ProxyStartPort > 65535 {
+		return nil, fmt.Errorf("invalid proxy start port: %d", cfg.Workers.ProxyStartPort)
 	}
 
-	// Initialize proxy configurations first
-	if err := service.initializeProxyConfigs(cfg, links); err != nil {
-		return nil, fmt.Errorf("failed to initialize proxy configs: %w", err)
+	// Validate if there's enough ports available
+	maxPort := cfg.Workers.ProxyStartPort + len(links) - 1
+	if maxPort > 65535 {
+		return nil, fmt.Errorf("not enough available ports for all links: need %d ports starting from %d",
+			len(links), cfg.Workers.ProxyStartPort)
+	}
+
+	// Initialize proxy ports map
+	proxyPorts := make(map[domain.LinkName]int, len(links))
+	for i, link := range links {
+		if link.LinkName == "" {
+			return nil, fmt.Errorf("link name cannot be empty")
+		}
+		if _, exists := proxyPorts[link.LinkName]; exists {
+			return nil, fmt.Errorf("duplicate link name found: %s", link.LinkName)
+		}
+		proxyPorts[link.LinkName] = cfg.Workers.ProxyStartPort + i
+	}
+
+	service := &Service{
+		runner:     runner,
+		logger:     logger,
+		configPath: ConfigPath(filepath.Join(cfg.XrayConfigsDir, "unified-config.json")),
+		metrics:    metrics,
+		proxyPorts: proxyPorts,
 	}
 
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
-			// Generate XRay config before starting
 			if err := service.generateConfig(links); err != nil {
 				return fmt.Errorf("failed to generate config: %w", err)
 			}
@@ -75,71 +82,21 @@ func NewService(
 	return service, nil
 }
 
-func (s *Service) initializeProxyConfigs(cfg *config.Config, links []domain.ParsedLink) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	// Validate inputs
-	if cfg == nil {
-		return fmt.Errorf("config cannot be nil")
-	}
-	if len(links) == 0 {
-		return fmt.Errorf("no links provided")
-	}
-	if cfg.Workers.ProxyStartPort <= 0 || cfg.Workers.ProxyStartPort > 65535 {
-		return fmt.Errorf("invalid proxy start port: %d", cfg.Workers.ProxyStartPort)
-	}
-
-	// Check if there's enough available ports
-	maxPort := cfg.Workers.ProxyStartPort + len(links) - 1
-	if maxPort > 65535 {
-		return fmt.Errorf("not enough available ports for all links: need %d ports starting from %d",
-			len(links), cfg.Workers.ProxyStartPort)
-	}
-
-	// Initialize proxy configurations
-	currentPort := cfg.Workers.ProxyStartPort
-	for _, link := range links {
-		if link.LinkName == "" {
-			return fmt.Errorf("link name cannot be empty")
-		}
-
-		// Check for duplicate link names
-		if _, exists := s.proxyConfigs[link.LinkName]; exists {
-			return fmt.Errorf("duplicate link name found: %s", link.LinkName)
-		}
-
-		// Store proxy configuration
-		s.proxyConfigs[link.LinkName] = proxyConfig{
-			address: "127.0.0.1", // Using localhost for SOCKS5 proxy
-			port:    currentPort,
-		}
-
-		s.logger.Debug("initialized proxy config",
-			zap.String("link", string(link.LinkName)),
-			zap.Int("port", currentPort))
-
-		currentPort++
-	}
-
-	return nil
-}
-
 // GetProxyConfig returns the proxy configuration for a given link
 func (s *Service) GetProxyConfig(linkName domain.LinkName) (string, int, error) {
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
+	if linkName == "" {
+		return "", 0, fmt.Errorf("link name cannot be empty")
+	}
 
-	cfg, exists := s.proxyConfigs[linkName]
+	port, exists := s.proxyPorts[linkName]
 	if !exists {
 		return "", 0, fmt.Errorf("no proxy configuration found for link: %s", linkName)
 	}
 
-	return cfg.address, cfg.port, nil
+	return "127.0.0.1", port, nil
 }
 
 func (s *Service) generateConfig(links []domain.ParsedLink) error {
-	// Validate input
 	if len(links) == 0 {
 		return fmt.Errorf("no links provided for configuration")
 	}
@@ -156,14 +113,7 @@ func (s *Service) generateConfig(links []domain.ParsedLink) error {
 	}
 
 	for _, l := range links {
-		if l.LinkName == "" {
-			return fmt.Errorf("link name cannot be empty")
-		}
-
-		proxyConfig, exists := s.proxyConfigs[l.LinkName]
-		if !exists {
-			return fmt.Errorf("proxy configuration not found for link: %s", l.LinkName)
-		}
+		port := s.proxyPorts[l.LinkName] // Use stored port directly
 
 		// Use sanitized names for tags
 		inboundTag := fmt.Sprintf("inbound-%s", url.QueryEscape(string(l.LinkName)))
@@ -172,8 +122,8 @@ func (s *Service) generateConfig(links []domain.ParsedLink) error {
 		// Add inbound configuration
 		cfg.Inbounds = append(cfg.Inbounds, InboundConfig{
 			Tag:      inboundTag,
-			Listen:   proxyConfig.address,
-			Port:     proxyConfig.port,
+			Listen:   "127.0.0.1",
+			Port:     port,
 			Protocol: "socks",
 			Sniffing: SniffingConfig{
 				Enabled:      true,
@@ -182,7 +132,7 @@ func (s *Service) generateConfig(links []domain.ParsedLink) error {
 			},
 		})
 
-		// Generate and validate outbound configuration
+		// Generate outbound configuration
 		outbound, err := generateOutbound(l, outboundTag)
 		if err != nil {
 			return fmt.Errorf("failed to generate outbound for %s: %w", l.LinkName, err)
@@ -196,23 +146,22 @@ func (s *Service) generateConfig(links []domain.ParsedLink) error {
 		})
 	}
 
-	// Create cfg directory if it doesn't exist
+	// Create config directory if it doesn't exist
 	if err := os.MkdirAll(filepath.Dir(string(s.configPath)), 0755); err != nil {
-		return fmt.Errorf("failed to create cfg directory: %w", err)
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// Write and validate the final cfg
+	// Write config file
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal cfg: %w", err)
+		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
 	if err := os.WriteFile(string(s.configPath), data, 0644); err != nil {
-		return fmt.Errorf("failed to write cfg file: %w", err)
+		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
-	// Log the cfg for debugging
-	s.logger.Debug("generated xray cfg", zap.String("cfg", string(data)))
+	s.logger.Debug("generated xray config", zap.String("config", string(data)))
 
 	return nil
 }

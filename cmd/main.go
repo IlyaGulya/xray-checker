@@ -2,14 +2,14 @@ package main
 
 import (
 	"context"
+	"go.uber.org/zap"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
-
-	"go.uber.org/zap"
 	"xray-checker/app"
+	"xray-checker/internal/common"
 )
 
 func main() {
@@ -19,10 +19,10 @@ func main() {
 	}
 	defer logger.Sync()
 
-	application := app.New(app.Options{
-		Logger: logger,
-		Env:    os.Getenv("APP_ENV"),
-	})
+	application := app.NewApplication(
+		common.WithLogger(logger),
+		common.WithEnv(os.Getenv("APP_ENV")),
+	)
 
 	// Start with background context
 	if err := application.Start(context.Background()); err != nil {
@@ -36,7 +36,7 @@ func main() {
 
 	logger.Info("received shutdown signal", zap.String("signal", sig.String()))
 
-	// Stop with timeout for graceful shutdown
+	// Stop with timeout
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 

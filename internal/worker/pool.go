@@ -6,9 +6,9 @@ import (
 	"go.uber.org/zap"
 	"sync"
 	"time"
-	"xray-checker/internal/checker"
 	"xray-checker/internal/config"
 	"xray-checker/internal/domain"
+	"xray-checker/internal/ipchecker"
 	"xray-checker/internal/xray"
 )
 
@@ -35,7 +35,7 @@ type PoolConfig struct {
 
 func NewPool(
 	cfg *config.Config,
-	checker checker.IPChecker,
+	checker ipchecker.IPChecker,
 	xrayService *xray.Service,
 	exporters map[domain.LinkName][]domain.Exporter,
 	scheduler Scheduler,

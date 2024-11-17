@@ -6,8 +6,8 @@ import (
 	"go.uber.org/zap"
 	"sync"
 	"time"
-	"xray-checker/internal/checker"
 	"xray-checker/internal/domain"
+	"xray-checker/internal/ipchecker"
 	"xray-checker/internal/xray"
 )
 
@@ -26,7 +26,7 @@ type workerConfig struct {
 type worker struct {
 	id          int
 	jobs        <-chan domain.ParsedLink
-	checker     checker.IPChecker
+	checker     ipchecker.IPChecker
 	xrayService *xray.Service
 	exporters   map[domain.LinkName][]domain.Exporter
 	logger      *zap.Logger
@@ -39,7 +39,7 @@ type worker struct {
 func NewWorker(
 	id int,
 	jobs <-chan domain.ParsedLink,
-	checker checker.IPChecker,
+	checker ipchecker.IPChecker,
 	xrayService *xray.Service,
 	exporters map[domain.LinkName][]domain.Exporter,
 	metrics domain.MetricsCollector,

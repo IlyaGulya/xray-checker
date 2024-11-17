@@ -4,15 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"xray-checker/internal/domain"
 	"xray-checker/internal/metrics"
 
@@ -334,7 +331,7 @@ func (s *Service) generateConfig(links []domain.ParsedLink) error {
 		return fmt.Errorf("no links provided for configuration")
 	}
 
-	config := &Config{
+	cfg := &Config{
 		Log: LogConfig{
 			LogLevel: "debug",
 		},
@@ -360,7 +357,7 @@ func (s *Service) generateConfig(links []domain.ParsedLink) error {
 		outboundTag := fmt.Sprintf("outbound-%s", url.QueryEscape(string(l.LinkName)))
 
 		// Add inbound configuration
-		config.Inbounds = append(config.Inbounds, InboundConfig{
+		cfg.Inbounds = append(cfg.Inbounds, InboundConfig{
 			Tag:      inboundTag,
 			Listen:   proxyConfig.address,
 			Port:     proxyConfig.port,
@@ -378,36 +375,31 @@ func (s *Service) generateConfig(links []domain.ParsedLink) error {
 			return fmt.Errorf("failed to generate outbound for %s: %w", l.LinkName, err)
 		}
 
-		// Validate the outbound configuration
-		if err := validateOutboundConfig(outbound); err != nil {
-			return fmt.Errorf("invalid outbound configuration for %s: %w", l.LinkName, err)
-		}
-
-		config.Outbounds = append(config.Outbounds, outbound)
-		config.Routing.Rules = append(config.Routing.Rules, RoutingRule{
+		cfg.Outbounds = append(cfg.Outbounds, outbound)
+		cfg.Routing.Rules = append(cfg.Routing.Rules, RoutingRule{
 			Type:        "field",
 			InboundTag:  inboundTag,
 			OutboundTag: outboundTag,
 		})
 	}
 
-	// Create config directory if it doesn't exist
+	// Create cfg directory if it doesn't exist
 	if err := os.MkdirAll(filepath.Dir(string(s.unifiedConfig)), 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
+		return fmt.Errorf("failed to create cfg directory: %w", err)
 	}
 
-	// Write and validate the final config
-	data, err := json.MarshalIndent(config, "", "  ")
+	// Write and validate the final cfg
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
+		return fmt.Errorf("failed to marshal cfg: %w", err)
 	}
 
 	if err := os.WriteFile(string(s.unifiedConfig), data, 0644); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
+		return fmt.Errorf("failed to write cfg file: %w", err)
 	}
 
-	// Log the config for debugging
-	s.logger.Debug("generated xray config", zap.String("config", string(data)))
+	// Log the cfg for debugging
+	s.logger.Debug("generated xray cfg", zap.String("cfg", string(data)))
 
 	return nil
 }
@@ -678,312 +670,4 @@ func (s *Service) stop() error {
 	defer s.mutex.Unlock()
 
 	return s.runner.Stop()
-}
-
-// in internal/xray/service.go
-
-// validateOutboundConfig ensures the outbound configuration is valid
-func validateOutboundConfig(outbound OutboundConfig) error {
-	// Check required fields
-	if outbound.Tag == "" {
-		return fmt.Errorf("outbound tag is required")
-	}
-
-	if outbound.Protocol == "" {
-		return fmt.Errorf("outbound protocol is required")
-	}
-
-	// Validate protocol-specific settings
-	var settings map[string]interface{}
-	if err := json.Unmarshal(outbound.Settings, &settings); err != nil {
-		return fmt.Errorf("invalid settings JSON: %w", err)
-	}
-
-	switch outbound.Protocol {
-	case "vless":
-		if err := validateVlessSettings(settings); err != nil {
-			return fmt.Errorf("invalid vless settings: %w", err)
-		}
-	case "trojan":
-		if err := validateTrojanSettings(settings); err != nil {
-			return fmt.Errorf("invalid trojan settings: %w", err)
-		}
-	case "shadowsocks":
-		if err := validateShadowsocksSettings(settings); err != nil {
-			return fmt.Errorf("invalid shadowsocks settings: %w", err)
-		}
-	case "freedom", "blackhole", "dns":
-		// Built-in protocols don't need validation
-		return nil
-	default:
-		return fmt.Errorf("unsupported protocol: %s", outbound.Protocol)
-	}
-
-	// Validate stream settings if present
-	if outbound.StreamSettings != nil {
-		var streamSettings map[string]interface{}
-		if err := json.Unmarshal(outbound.StreamSettings, &streamSettings); err != nil {
-			return fmt.Errorf("invalid stream settings JSON: %w", err)
-		}
-
-		if err := validateStreamSettings(streamSettings); err != nil {
-			return fmt.Errorf("invalid stream settings: %w", err)
-		}
-	}
-
-	return nil
-}
-
-func validateVlessSettings(settings map[string]interface{}) error {
-	vnext, ok := settings["vnext"].([]interface{})
-	if !ok || len(vnext) == 0 {
-		return fmt.Errorf("vnext configuration is required")
-	}
-
-	for i, server := range vnext {
-		serverMap, ok := server.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("invalid server configuration at index %d", i)
-		}
-
-		// Check required fields
-		if _, ok := serverMap["address"].(string); !ok {
-			return fmt.Errorf("server address is required at index %d", i)
-		}
-
-		// Validate port is a number
-		port, ok := serverMap["port"].(float64)
-		if !ok {
-			return fmt.Errorf("server port is required at index %d and must be a number", i)
-		}
-		if port < 1 || port > 65535 {
-			return fmt.Errorf("invalid port number at index %d: must be between 1 and 65535", i)
-		}
-
-		users, ok := serverMap["users"].([]interface{})
-		if !ok || len(users) == 0 {
-			return fmt.Errorf("users configuration is required at index %d", i)
-		}
-
-		for j, user := range users {
-			userMap, ok := user.(map[string]interface{})
-			if !ok {
-				return fmt.Errorf("invalid user configuration at server %d, user %d", i, j)
-			}
-
-			if _, ok := userMap["id"].(string); !ok {
-				return fmt.Errorf("user id is required at server %d, user %d", i, j)
-			}
-		}
-	}
-
-	return nil
-}
-
-func validateTrojanSettings(settings map[string]interface{}) error {
-	servers, ok := settings["servers"].([]interface{})
-	if !ok || len(servers) == 0 {
-		return fmt.Errorf("servers configuration is required")
-	}
-
-	for i, server := range servers {
-		serverMap, ok := server.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("invalid server configuration at index %d", i)
-		}
-
-		// Check required fields
-		if _, ok := serverMap["address"].(string); !ok {
-			return fmt.Errorf("server address is required at index %d", i)
-		}
-
-		// Check port - can be float64 (from JSON number) or int
-		port, ok := serverMap["port"].(float64)
-		if !ok {
-			// Try as integer
-			portInt, ok := serverMap["port"].(int)
-			if !ok {
-				return fmt.Errorf("server port is required at index %d and must be a number", i)
-			}
-			port = float64(portInt)
-		}
-
-		// Validate port range
-		if port < 1 || port > 65535 {
-			return fmt.Errorf("invalid port number at index %d: must be between 1 and 65535", i)
-		}
-
-		if _, ok := serverMap["password"].(string); !ok {
-			return fmt.Errorf("password is required at index %d", i)
-		}
-	}
-
-	return nil
-}
-
-func validateShadowsocksSettings(settings map[string]interface{}) error {
-	servers, ok := settings["servers"].([]interface{})
-	if !ok || len(servers) == 0 {
-		return fmt.Errorf("servers configuration is required")
-	}
-
-	for i, server := range servers {
-		serverMap, ok := server.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("invalid server configuration at index %d", i)
-		}
-
-		// Check required fields
-		if _, ok := serverMap["address"].(string); !ok {
-			return fmt.Errorf("server address is required at index %d", i)
-		}
-
-		// Check port - allow both number and string types
-		switch port := serverMap["port"].(type) {
-		case float64:
-			if port < 1 || port > 65535 {
-				return fmt.Errorf("invalid port number at index %d: must be between 1 and 65535", i)
-			}
-		case int:
-			if port < 1 || port > 65535 {
-				return fmt.Errorf("invalid port number at index %d: must be between 1 and 65535", i)
-			}
-		default:
-			return fmt.Errorf("server port is required at index %d and must be a number", i)
-		}
-
-		if _, ok := serverMap["method"].(string); !ok {
-			return fmt.Errorf("encryption method is required at index %d", i)
-		}
-
-		if _, ok := serverMap["password"].(string); !ok {
-			return fmt.Errorf("password is required at index %d", i)
-		}
-	}
-
-	return nil
-}
-
-func validateStreamSettings(settings map[string]interface{}) error {
-	// Check network type
-	network, ok := settings["network"].(string)
-	if !ok {
-		return fmt.Errorf("network type is required in stream settings")
-	}
-
-	if !isValidTransportProtocol(network) {
-		return fmt.Errorf("invalid network type: %s", network)
-	}
-
-	// Check security settings
-	security, ok := settings["security"].(string)
-	if !ok {
-		return fmt.Errorf("security type is required in stream settings")
-	}
-
-	// Validate security-specific settings
-	switch security {
-	case "tls":
-		tlsSettings, ok := settings["tlsSettings"].(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("tlsSettings is required when security is tls")
-		}
-		if _, ok := tlsSettings["serverName"].(string); !ok {
-			return fmt.Errorf("serverName is required in tlsSettings")
-		}
-	case "reality":
-		realitySettings, ok := settings["realitySettings"].(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("realitySettings is required when security is reality")
-		}
-		required := []string{"serverName", "fingerprint", "publicKey", "shortId"}
-		for _, field := range required {
-			if _, ok := realitySettings[field].(string); !ok {
-				return fmt.Errorf("%s is required in realitySettings", field)
-			}
-		}
-	case "none":
-		// No additional validation needed
-	default:
-		return fmt.Errorf("unsupported security type: %s", security)
-	}
-
-	// Validate transport-specific settings
-	switch network {
-	case "tcp":
-		tcpSettings, ok := settings["tcpSettings"].(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("tcpSettings is required for network type tcp")
-		}
-		header, ok := tcpSettings["header"].(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("header is required in tcpSettings")
-		}
-		headerType, ok := header["type"].(string)
-		if !ok {
-			return fmt.Errorf("header type is required in tcpSettings")
-		}
-		if headerType == "" {
-			return fmt.Errorf("header type cannot be empty in tcpSettings")
-		}
-	case "ws":
-		wsSettings, ok := settings["wsSettings"].(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("wsSettings is required for network type ws")
-		}
-
-		// Validate path if present
-		if path, exists := wsSettings["path"].(string); exists {
-			if path != "" && !strings.HasPrefix(path, "/") {
-				return fmt.Errorf("WebSocket path must start with / if specified")
-			}
-		}
-
-		// Validate headers if present
-		if headers, exists := wsSettings["headers"].(map[string]interface{}); exists {
-			// If headers exist, validate Host if present
-			if host, hasHost := headers["Host"].(string); hasHost {
-				if host != "" && !isValidHostname(host) {
-					return fmt.Errorf("invalid Host header in wsSettings")
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// Helper function to validate hostname format
-func isValidHostname(host string) bool {
-	// Basic hostname validation
-	// Can be extended based on specific requirements
-	if len(host) > 255 {
-		return false
-	}
-
-	// Allow IPv4 addresses
-	if net.ParseIP(host) != nil {
-		return true
-	}
-
-	// Check hostname format
-	for _, part := range strings.Split(host, ".") {
-		if len(part) == 0 || len(part) > 63 {
-			return false
-		}
-		if !strings.ContainsAny(part, "-") && !isAlphanumeric(part) {
-			return false
-		}
-	}
-	return true
-}
-
-// Helper function to check if string is alphanumeric
-func isAlphanumeric(s string) bool {
-	for _, r := range s {
-		if !unicode.IsLetter(r) && !unicode.IsNumber(r) {
-			return false
-		}
-	}
-	return true
 }
